@@ -1,0 +1,81 @@
+name: Sync Sub-Store Engine
+
+on:
+  schedule:
+    - cron: "0 6 * * 0"   # 每周日早6点
+  workflow_dispatch:        # 也可手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install build deps
+        run: |
+          cd tools/proxy-utils-src
+          npm install
+
+      - name: Sync parsers/preprocessors/producers from upstream
+        run: |
+          cd tools/proxy-utils-src
+          node sync-proxy-utils.js
+
+      - name: Precompile PEG grammars & build bundle
+        run: |
+          cd tools/proxy-utils-src
+          node build-proxy-utils.js
+
+      - name: Check if proxy-utils.esm.js changed
+        id: changed
+        run: |
+          if git diff --name-only | grep -q 'proxy-utils.esm.js'; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Bump version and update CHANGELOG
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          # 提取当前版本号
+          OLD_VER=$(grep -oP "BOT_VERSION = '\K[^']+" worker.mjs)
+          MAJOR=$(echo $OLD_VER | cut -d. -f1)
+          MINOR=$(echo $OLD_VER | cut -d. -f2)
+          PATCH=$(echo $OLD_VER | cut -d. -f3)
+          NEW_PATCH=$((PATCH + 1))
+          NEW_VER="${MAJOR}.${MINOR}.${NEW_PATCH}"
+          echo "Version: $OLD_VER → $NEW_VER"
+
+          # 更新 worker.mjs 版本号
+          sed -i "s/BOT_VERSION = '$OLD_VER'/BOT_VERSION = '$NEW_VER'/" worker.mjs
+
+          # 追加 CHANGELOG（前插到文件顶部）
+          DATE=$(date +%Y-%m-%d)
+          { printf "## v${NEW_VER} (%s)\n- 同步 Sub-Store 引擎更新\n\n" "$DATE"; cat CHANGELOG.md; } > CHANGELOG.md.tmp
+          mv CHANGELOG.md.tmp CHANGELOG.md
+
+      - name: Commit and annotate
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add proxy-utils.esm.js worker.mjs CHANGELOG.md tools/proxy-utils-src/src/
+          git commit -m "chore: sync Sub-Store engine [skip ci]"
+          git push
+          echo "::notice title=Engine Update::proxy-utils.esm.js 已更新，版本已递增"
+
+      - name: No change notice
+        if: steps.changed.outputs.changed == 'false'
+        run: |
+          echo "::notice title=Engine Update::Sub-Store 引擎已是最新，无变化"
